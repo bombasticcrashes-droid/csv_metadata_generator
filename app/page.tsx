@@ -3,6 +3,7 @@
 /**
  * Main Page Component
  * Adobe Stock CSV Generator - Single page application
+ * Modified: Concurrency set to 1 and Retry Button added
  */
 import { useState, useCallback, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
@@ -11,7 +12,7 @@ import { ApiKeyModal } from '@/app/components/ApiKeyModal';
 import { UploadDropzone } from '@/app/components/UploadDropzone';
 import { BatchToolbarCompact } from '@/app/components/BatchToolbarCompact';
 import { ThemeToggle } from '@/app/components/ThemeToggle';
-import { Key, Eye } from 'lucide-react';
+import { Key, Eye, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useApiKeyContext } from '@/app/context/ApiKeyContext';
@@ -36,11 +37,10 @@ export default function Page() {
     inProgress: 0,
   });
 
-  // Cleanup blob URLs on unmount (data URLs don't need to be revoked)
+  // Cleanup blob URLs on unmount
   useEffect(() => {
     return () => {
       rows.forEach((row) => {
-        // Only revoke blob URLs, not data URLs
         if (row.preview && row.preview.startsWith('blob:')) {
           revokePreviewUrl(row.preview);
         }
@@ -49,14 +49,11 @@ export default function Page() {
   }, [rows]);
 
   const handleClearProcessed = useCallback(() => {
-    // Remove all images that are not pending (success, error, generating)
     const pendingRows = rows.filter(r => r.status === 'pending');
     setRows(pendingRows);
   }, [rows, setRows]);
 
   const handleFilesAdded = useCallback((newRows: ImageRow[]) => {
-    // UploadDropzone already calls onClearProcessed before calling onFilesAdded
-    // So we just need to add the new pending files
     addRows(newRows);
   }, [addRows]);
 
@@ -70,7 +67,6 @@ export default function Page() {
   const handleRemove = useCallback(
     (id: string) => {
       const row = rows.find((r) => r.id === id);
-      // Only revoke blob URLs, not data URLs
       if (row && row.preview && row.preview.startsWith('blob:')) {
         revokePreviewUrl(row.preview);
       }
@@ -108,7 +104,6 @@ export default function Page() {
 
   const generateForRow = useCallback(
     async (row: ImageRow, apiKey: string): Promise<void> => {
-      // Check if file is available (might be missing if loaded from localStorage)
       if (!row.file) {
         handleUpdateRow(row.id, {
           status: 'error',
@@ -120,20 +115,13 @@ export default function Page() {
         return;
       }
 
-      // Update status to generating
       handleUpdateRow(row.id, { status: 'generating', generatedAt: Date.now() });
 
       try {
-        // Convert image to base64
         const base64 = await fileToBase64(row.file);
-
-        // Call Gemini API
         const response = await generateMetadata(apiKey, base64);
-
-        // Process keywords
         const keywordResult = processKeywords(response.keywords);
 
-        // Update row with results
         handleUpdateRow(row.id, {
           status: 'success',
           title: response.title,
@@ -144,13 +132,11 @@ export default function Page() {
       } catch (error) {
         let errorMessage = 'Unknown error occurred';
 
-        // Check if it's a GeminiApiError with QUOTA_EXCEEDED code
         if (error && typeof error === 'object' && 'code' in error && (error as GeminiApiError).code === 'QUOTA_EXCEEDED') {
-          // Handle 429 quota exceeded error with user-friendly message
           const quotaError = error as GeminiApiError;
-          errorMessage = quotaError.message || 'API quota exceeded. You have reached your daily request limit. Please try again later or check your billing plan.';
+          errorMessage = quotaError.message || 'API quota exceeded. Please try again later.';
           toast.error('Quota Exceeded', {
-            description: 'You have reached your daily API request limit. Please try again later or upgrade your plan.',
+            description: 'You have reached your daily API request limit.',
             duration: 10000,
           });
         } else if (error instanceof Error) {
@@ -170,6 +156,7 @@ export default function Page() {
     [handleUpdateRow]
   );
 
+  // --- FIXED: BATCH GENERATION LOGIC ---
   const generateBatch = useCallback(
     async (rowsToGenerate: ImageRow[]) => {
       if (!apiKey) {
@@ -190,8 +177,8 @@ export default function Page() {
         inProgress: rowsToGenerate.length,
       });
 
-      // Process with concurrency limit
-      const concurrency = GEMINI_CONFIG.CONCURRENCY_LIMIT;
+      // FIXED: Set Concurrency to 1 (One by one)
+      const concurrency = 1; 
       const queue = [...rowsToGenerate];
       const results: Array<{ success: boolean }> = [];
 
@@ -203,6 +190,10 @@ export default function Page() {
           try {
             await generateForRow(row, apiKey);
             results.push({ success: true });
+            
+            // Wait 1 second after success to prevent Rate Limiting
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
             setProgress((prev) => ({
               ...prev,
               completed: prev.completed + 1,
@@ -210,6 +201,9 @@ export default function Page() {
             }));
           } catch (error) {
             results.push({ success: false });
+            // Wait 2 seconds after error
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
             setProgress((prev) => ({
               ...prev,
               failed: prev.failed + 1,
@@ -219,7 +213,6 @@ export default function Page() {
         }
       };
 
-      // Start concurrent workers
       const workers = Array.from({ length: Math.min(concurrency, rowsToGenerate.length) }, () =>
         processQueue()
       );
@@ -231,7 +224,6 @@ export default function Page() {
 
       setIsGenerating(false);
 
-      // Reset progress after a short delay to show completion
       setTimeout(() => {
         setProgress({
           total: 0,
@@ -263,9 +255,19 @@ export default function Page() {
     generateBatch(selectedPendingRows);
   }, [rows, generateBatch]);
 
+  // --- NEW: RETRY FAILED BUTTON LOGIC ---
+  const handleRetryFailed = useCallback(() => {
+    const failedRows = rows.filter((r) => r.status === 'error');
+    if (failedRows.length === 0) {
+      toast.info('No failed images to retry');
+      return;
+    }
+    toast.info(`Retrying ${failedRows.length} failed images...`);
+    generateBatch(failedRows);
+  }, [rows, generateBatch]);
 
-  // Only count successful results for the "View Results" button
   const processedResultsCount = rows.filter(r => r.status === 'success').length;
+  const failedResultsCount = rows.filter(r => r.status === 'error').length;
 
   return (
     <main className="min-h-screen bg-background">
@@ -279,6 +281,20 @@ export default function Page() {
               </p>
             </div>
             <div className="flex items-center gap-3">
+               {/* NEW: Retry Button (Only shows if there are errors) */}
+               {failedResultsCount > 0 && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleRetryFailed}
+                  disabled={isGenerating}
+                  className="gap-1.5"
+                >
+                  <RefreshCw className={`h-4 w-4 ${isGenerating ? 'animate-spin' : ''}`} />
+                  Retry Failed ({failedResultsCount})
+                </Button>
+              )}
+
               <Button
                 variant="outline"
                 size="sm"
@@ -307,7 +323,6 @@ export default function Page() {
         </header>
 
         <div className="space-y-6">
-          {/* Upload Dropzone */}
           <UploadDropzone
             onFilesAdded={handleFilesAdded}
             existingFiles={rows}
@@ -337,7 +352,6 @@ export default function Page() {
             }
           />
 
-          {/* Message when API key not configured but images uploaded */}
           {!hasKey && rows.length > 0 && (
             <div className="rounded-lg border-2 border-yellow-500/50 bg-yellow-500/10 p-6">
               <div className="flex items-start gap-4">
