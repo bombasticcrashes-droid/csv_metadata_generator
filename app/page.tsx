@@ -2,8 +2,8 @@
 
 /**
  * Main Page Component
- * Adobe Stock CSV Generator - SUPER SAFE MODE
- * 6 Seconds Delay added to prevent "Quota Exceeded" errors
+ * Adobe Stock CSV Generator - SUPER SLOW MODE (Free Tier Fix)
+ * 12 Seconds Delay added to bypass "Limit: 20" error
  */
 import { useState, useCallback, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
@@ -131,9 +131,8 @@ export default function Page() {
         
         let errorMessage = 'Failed';
 
-        // More detailed error handling
         if (error && typeof error === 'object' && 'code' in error && (error as GeminiApiError).code === 'QUOTA_EXCEEDED') {
-          errorMessage = 'Daily Quota Exceeded (Wait 24h)';
+          errorMessage = 'Limit Reached (Waiting...)';
         } else if (error instanceof Error) {
           errorMessage = error.message;
         }
@@ -148,12 +147,12 @@ export default function Page() {
     [handleUpdateRow]
   );
 
-  // --- SAFE MODE BATCH GENERATION ---
+  // --- SUPER SLOW MODE BATCH GENERATION ---
   const generateBatch = useCallback(
     async (rowsToGenerate: ImageRow[]) => {
       if (!apiKey) {
         toast.error('Please click "Configure API Key" first!');
-        setApiKeyModalOpen(true); // Open modal automatically if no key
+        setApiKeyModalOpen(true);
         return;
       }
 
@@ -170,11 +169,10 @@ export default function Page() {
         inProgress: rowsToGenerate.length,
       });
 
-      // STRICTLY 1 AT A TIME
       const queue = [...rowsToGenerate];
       const results: Array<{ success: boolean }> = [];
 
-      // Process strictly sequentially (no Promise.all workers)
+      // Loop starts here
       for (const row of queue) {
           try {
             await generateForRow(row, apiKey);
@@ -186,8 +184,9 @@ export default function Page() {
               inProgress: prev.inProgress - 1,
             }));
 
-            // SUCCESS DELAY: 5 Seconds (Safe for Free Tier)
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            // SUCCESS DELAY: 12 Seconds (Must be slow for Free Tier)
+            // Agar apko lagta hai bohot slow hai, to isay 8000 (8 sec) kar lein, lekin error ka risk hoga.
+            await new Promise(resolve => setTimeout(resolve, 12000));
 
           } catch (error) {
             results.push({ success: false });
@@ -198,8 +197,8 @@ export default function Page() {
               inProgress: prev.inProgress - 1,
             }));
 
-            // ERROR DELAY: 10 Seconds (Back off if error occurs)
-            await new Promise(resolve => setTimeout(resolve, 10000));
+            // ERROR DELAY: 20 Seconds (Agar error aye to lamba wait karo)
+            await new Promise(resolve => setTimeout(resolve, 20000));
           }
       }
 
@@ -218,10 +217,10 @@ export default function Page() {
       }, 2000);
 
       if (successCount > 0) {
-        toast.success(`Done! ${successCount} successful.`);
+        toast.success(`Done! ${successCount} processed.`);
       }
       if (failCount > 0) {
-        toast.error(`${failCount} failed. Check API limit.`);
+        toast.error(`${failCount} failed. Use Retry button.`);
       }
     },
     [apiKey, generateForRow]
@@ -245,7 +244,7 @@ export default function Page() {
       toast.info('No failed images to retry');
       return;
     }
-    toast.info(`Retrying ${failedRows.length} failed images...`);
+    toast.info(`Retrying ${failedRows.length} failed images (Slowly)...`);
     generateBatch(failedRows);
   }, [rows, generateBatch]);
 
@@ -260,7 +259,7 @@ export default function Page() {
             <div className="flex-1">
               <h1 className="text-3xl font-bold tracking-tight">Adobe Stock CSV Generator</h1>
               <p className="mt-2 text-muted-foreground">
-                Safe Mode: Processes 1 image every 5 seconds to avoid errors.
+                Free Tier Mode: Processing 1 image every 12 seconds to avoid Google Limits.
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -358,7 +357,7 @@ export default function Page() {
                     API Key Required
                   </h3>
                   <p className="mt-2 text-sm text-yellow-800 dark:text-yellow-200">
-                    Please click "Configure API Key" above and paste your Gemini Key.
+                    You need to configure your Gemini API key to generate metadata.
                   </p>
                 </div>
               </div>
